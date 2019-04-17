@@ -115,11 +115,12 @@ public:
         static sp<APMConfigHelper> mApmConfigs;
 
 protected:
-         status_t checkAndSetVolume(audio_stream_type_t stream,
-                                                   int index,
-                                                   const sp<AudioOutputDescriptor>& outputDesc,
-                                                   audio_devices_t device,
-                                                   int delayMs = 0, bool force = false);
+        // check that volume change is permitted, compute and send new volume to audio hardware
+        virtual status_t checkAndSetVolume(IVolumeCurves &curves,
+                                           VolumeSource volumeSource, int index,
+                                           const sp<AudioOutputDescriptor>& outputDesc,
+                                           audio_devices_t device,
+                                           int delayMs = 0, bool force = false);
 
         // avoid invalidation for active music stream on  previous outputs
         // which is supported on the new device.
@@ -128,8 +129,6 @@ protected:
 
         // Must be called before updateDevicesAndOutputs()
         void checkOutputForAttributes(const audio_attributes_t &attr);
-        // returns true if given output is direct output
-        bool isDirectOutput(audio_io_handle_t output);
 
         // if argument "device" is different from AUDIO_DEVICE_NONE,  startSource() will force
         // the re-evaluation of the output device.
@@ -146,24 +145,20 @@ protected:
         uint32_t setBeaconMute(bool){return 0;}
         static audio_output_flags_t getFallBackPath();
         int mFallBackflag;
-        void moveGlobalEffect();
         //parameter indicates of HDMI speakers disabled
         bool mHdmiAudioDisabled;
         //parameter indicates if HDMI plug in/out detected
         bool mHdmiAudioEvent;
 
 private:
-        // updates device caching and output for streams that can influence the
-        //    routing of notifications
-        void handleNotificationRoutingForStream(audio_stream_type_t stream);
         // internal method to return the output handle for the given device and format
         audio_io_handle_t getOutputForDevices(
                 const DeviceVector &devices,
                 audio_session_t session,
                 audio_stream_type_t stream,
                 const audio_config_t *config,
-                audio_output_flags_t *flags);
-
+                audio_output_flags_t *flags,
+                bool forceMutingHaptic = false);
 
         // internal method to fill offload info in case of Direct PCM
         status_t getOutputForAttr(const audio_attributes_t *attr,
@@ -188,8 +183,5 @@ private:
         int mvoice_call_state;
         // Used for record + playback concurrency
         bool mIsInputRequestOnProgress;
-
-        float mPrevFMVolumeDb;
-        bool mFMIsActive;
 };
 };
