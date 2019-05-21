@@ -331,8 +331,6 @@ status_t AudioPolicyManagerCustom::setDeviceConnectionStateInt(audio_devices_t d
 
     // handle input devices
     if (audio_is_input_device(deviceType)) {
-        SortedVector <audio_io_handle_t> inputs;
-
         ssize_t index = mAvailableInputDevices.indexOf(device);
         switch (state)
         {
@@ -353,7 +351,7 @@ status_t AudioPolicyManagerCustom::setDeviceConnectionStateInt(audio_devices_t d
             // parameters on newly connected devices (instead of opening the inputs...)
             broadcastDeviceConnectionState(device, state);
 
-            if (checkInputsForDevice(device, state, inputs) != NO_ERROR) {
+            if (checkInputsForDevice(device, state) != NO_ERROR) {
                 broadcastDeviceConnectionState(device, AUDIO_POLICY_DEVICE_STATE_UNAVAILABLE);
 
                 mHwModules.cleanUpForDevice(device);
@@ -382,7 +380,7 @@ status_t AudioPolicyManagerCustom::setDeviceConnectionStateInt(audio_devices_t d
             // Set Disconnect to HALs
             broadcastDeviceConnectionState(device, state);
 
-            checkInputsForDevice(device, state, inputs);
+            checkInputsForDevice(device, state);
             mAvailableInputDevices.remove(device);
 
         } break;
@@ -395,7 +393,7 @@ status_t AudioPolicyManagerCustom::setDeviceConnectionStateInt(audio_devices_t d
         // Propagate device availability to Engine
         setEngineDeviceConnectionState(device, state);
 
-        closeAllInputs();
+        checkCloseInputs();
         /*audio policy: fix call volume over USB*/
         // As the input device list can impact the output device selection, update
         // getDeviceForStrategy() cache
@@ -522,7 +520,7 @@ bool AudioPolicyManagerCustom::isOffloadSupported(const audio_offload_info_t& of
     }
 
     // Check if offload has been disabled
-    bool offloadDisabled = property_get_bool("audio.offload.disable", false);
+    bool offloadDisabled = mApmConfigs->isAudioOffloadDisabled();
     if (offloadDisabled) {
         ALOGI("offload disabled by audio.offload.disable=%d", offloadDisabled);
         return false;
@@ -1639,7 +1637,7 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevices(
     }
 
     // Do internal direct magic here
-    bool offload_disabled = property_get_bool("audio.offload.disable", false);
+    bool offload_disabled = mApmConfigs->isAudioOffloadDisabled();
     if ((*flags == AUDIO_OUTPUT_FLAG_NONE) &&
         (stream == AUDIO_STREAM_MUSIC) &&
         ( !offload_disabled) &&
@@ -1654,14 +1652,20 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevices(
         *flags = (audio_output_flags_t)(AUDIO_OUTPUT_FLAG_NONE);
     }
 
-    // check if direct output for pcm/track offload already exits
+    // check if direct output for pcm/track offload or compress offload already exist
     bool direct_pcm_already_in_use = false;
-    if (*flags == AUDIO_OUTPUT_FLAG_DIRECT) {
+    bool compress_offload_already_in_use = false;
+    if (*flags & AUDIO_OUTPUT_FLAG_DIRECT) {
         for (size_t i = 0; i < mOutputs.size(); i++) {
             sp<SwAudioOutputDescriptor> desc = mOutputs.valueAt(i);
             if (desc->mFlags == AUDIO_OUTPUT_FLAG_DIRECT) {
                 direct_pcm_already_in_use = true;
                 ALOGD("Direct PCM already in use");
+                break;
+            }
+            if (desc->mFlags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) {
+                compress_offload_already_in_use = true;
+                ALOGD("Compress Offload already in use");
                 break;
             }
         }
@@ -1677,9 +1681,10 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevices(
     bool forced_deep = false;
     // only allow deep buffering for music stream type
     if (stream != AUDIO_STREAM_MUSIC) {
-        *flags = (audio_output_flags_t)(*flags &~AUDIO_OUTPUT_FLAG_DEEP_BUFFER);
+        *flags = (audio_output_flags_t)(*flags & ~AUDIO_OUTPUT_FLAG_DEEP_BUFFER);
     } else if (/* stream == AUDIO_STREAM_MUSIC && */
-            (*flags == AUDIO_OUTPUT_FLAG_NONE || *flags == AUDIO_OUTPUT_FLAG_DIRECT) &&
+            (*flags == AUDIO_OUTPUT_FLAG_NONE || *flags == AUDIO_OUTPUT_FLAG_DIRECT ||
+            (*flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD)) &&
             mApmConfigs->isAudioDeepbufferMediaEnabled() && !isInCall()) {
             forced_deep = true;
     }
@@ -1764,8 +1769,9 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevices(
                         }
                     }
                     if (outputDesc != NULL) {
-                        if (*flags == AUDIO_OUTPUT_FLAG_DIRECT &&
-                             direct_pcm_already_in_use == true &&
+                        if ((((*flags == AUDIO_OUTPUT_FLAG_DIRECT) && direct_pcm_already_in_use) ||
+                            ((*flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) &&
+                             compress_offload_already_in_use)) &&
                              session != outputDesc->mDirectClientSession) {
                              ALOGV("getOutput() do not reuse direct pcm output because current client (%d) "
                                    "is not the same as requesting client (%d) for different output conf",
@@ -1861,6 +1867,7 @@ non_direct_output:
 
 status_t AudioPolicyManagerCustom::getInputForAttr(const audio_attributes_t *attr,
                                          audio_io_handle_t *input,
+                                         audio_unique_id_t riid,
                                          audio_session_t session,
                                          uid_t uid,
                                          const audio_config_base_t *config,
@@ -1926,6 +1933,7 @@ status_t AudioPolicyManagerCustom::getInputForAttr(const audio_attributes_t *att
 
     return AudioPolicyManager::getInputForAttr(attr,
                                                input,
+                                               riid,
                                                session,
                                                uid,
                                                config,
@@ -1961,6 +1969,11 @@ status_t AudioPolicyManagerCustom::startInput(audio_port_handle_t portId)
 
     audio_io_handle_t input = inputDesc->mIoHandle;
     sp<RecordClientDescriptor> client = inputDesc->getClient(portId);
+    if (client == NULL) {
+        ALOGW("%s invalid client desc for %d", __FUNCTION__, portId);
+        return BAD_VALUE;
+    }
+
     if (client->active()) {
         ALOGW("%s input %d client %d already started", __FUNCTION__, input, client->portId());
         return INVALID_OPERATION;
