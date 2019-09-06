@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2019 The Linux Foundation. All rights reserved.
  * Not a contribution.
  *
  * Copyright (C) 2009 The Android Open Source Project
@@ -1794,6 +1794,13 @@ audio_io_handle_t AudioPolicyManagerCustom::getOutputForDevice(
         goto non_direct_output;
     }
 
+    if (property_get_bool("vendor.audio.pcm.direct.disable", false /* default_value */) &&
+                audio_is_linear_pcm(config->format)) {
+        ALOGD(":%s Force route mch pcm to deep buffer", __func__);
+        forced_deep = true;
+        goto non_direct_output;
+    }
+
     // Do not allow offloading if one non offloadable effect is enabled or MasterMono is enabled.
     // This prevents creating an offloaded track and tearing it down immediately after start
     // when audioflinger detects there is an active non offloadable effect.
@@ -2246,10 +2253,11 @@ status_t AudioPolicyManagerCustom::startInput(audio_io_handle_t input,
         }
 
         if (inputDesc->getAudioSessionCount(true/*activeOnly*/) == 1) {
+            sp<AudioPolicyMix> policyMix = inputDesc->mPolicyMix.promote();
             // if input maps to a dynamic policy with an activity listener, notify of state change
-            if ((inputDesc->mPolicyMix != NULL)
-                    && ((inputDesc->mPolicyMix->mCbFlags & AudioMix::kCbFlagNotifyActivity) != 0)) {
-                mpClientInterface->onDynamicPolicyMixStateUpdate(inputDesc->mPolicyMix->mDeviceAddress,
+            if ((policyMix != NULL)
+                    && ((policyMix->mCbFlags & AudioMix::kCbFlagNotifyActivity) != 0)) {
+                mpClientInterface->onDynamicPolicyMixStateUpdate(policyMix->mDeviceAddress,
                         MIX_STATE_MIXING);
             }
 
@@ -2268,10 +2276,10 @@ status_t AudioPolicyManagerCustom::startInput(audio_io_handle_t input,
             // For remote submix (a virtual device), we open only one input per capture request.
             if (audio_is_remote_submix_device(inputDesc->mDevice)) {
                 String8 address = String8("");
-                if (inputDesc->mPolicyMix == NULL) {
+                if (policyMix == NULL) {
                     address = String8("0");
-                } else if (inputDesc->mPolicyMix->mMixType == MIX_TYPE_PLAYERS) {
-                    address = inputDesc->mPolicyMix->mDeviceAddress;
+                } else if (policyMix->mMixType == MIX_TYPE_PLAYERS) {
+                    address = policyMix->mDeviceAddress;
                 }
                 if (address != "") {
                     setDeviceConnectionStateInt(AUDIO_DEVICE_OUT_REMOTE_SUBMIX,
